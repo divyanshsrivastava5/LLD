@@ -1,8 +1,7 @@
 import glob
-import json
 import os
 import subprocess
-import urllib.request
+from google import genai
 
 
 def get_target_code():
@@ -84,29 +83,24 @@ def run_review():
             + code_content
         )
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
-    payload = {"contents": [{"parts": [{"text": prompt}]}]}
-
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-    )
-
     try:
-        with urllib.request.urlopen(req) as response:
-            res_data = json.loads(response.read().decode("utf-8"))
-            review_text = res_data["candidates"][0]["content"]["parts"][0]["text"]
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+        )
 
-            print("\n" + "=" * 50)
-            print("AI CODE REVIEW RESULTS")
-            print("=" * 50 + "\n")
-            print(review_text)
+        review_text = response.text
+        print("\n" + "=" * 50)
+        print("AI CODE REVIEW RESULTS")
+        print("=" * 50 + "\n")
+        print(review_text)
 
-            step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
-            if step_summary:
-                with open(step_summary, "a", encoding="utf-8") as f:
-                    f.write(f"## 🤖 AI Code Review\n\n{review_text}\n")
+        step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+        if step_summary:
+            with open(step_summary, "a", encoding="utf-8") as f:
+                f.write(f"## 🤖 AI Code Review\n\n{review_text}\n")
+
     except Exception as e:
         print(f"Error during Gemini review: {e}")
 

@@ -24,9 +24,9 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Fast Lint (Ruff)
+      - name: Install Dependencies & Linter
         run: |
-          pip install ruff
+          pip install ruff google-genai
           ruff check . || true
 
       - name: Run AI Reviewer Agent
