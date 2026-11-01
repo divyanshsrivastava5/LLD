@@ -5,7 +5,8 @@ import os
 from pathlib import Path
 import subprocess
 import time
-from google import genai, APIError
+from google import genai
+from google.genai.errors import APIError
 
 logging.basicConfig(
     level=logging.INFO,
