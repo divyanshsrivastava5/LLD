@@ -1,0 +1,36 @@
+name: Python Checks & AI Review
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Fast Lint (Ruff)
+        run: |
+          pip install ruff
+          ruff check . || true
+
+      - name: Run AI Reviewer Agent
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python .github/scripts/review.py
