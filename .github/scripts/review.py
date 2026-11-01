@@ -1,16 +1,31 @@
-import glob
 import os
-import subprocess
+import glob
 import time
+import logging
+import subprocess
+from collections.abc import Sequence
 from google import genai
 from google.genai.errors import APIError
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
 
-def get_target_code():
-    # 1. Try git diff against previous commit
+MODELS: tuple[str, ...] = (
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-3.8-flash",
+)
+RULES_FILE = "agents/solid_agent.md"
+
+
+def get_target_code() -> tuple[str | None, str]:
+    target_filter = ":(exclude).github/*"
+
+    # Try diff against previous commit
     try:
         diff = subprocess.check_output(
-            ["git", "diff", "HEAD~1", "HEAD", "--", "*.py"],
+            ["git", "diff", "HEAD~1", "HEAD", "--", "*.py", target_filter],
             stderr=subprocess.DEVNULL,
             text=True,
         ).strip()
@@ -19,124 +34,82 @@ def get_target_code():
     except Exception:
         pass
 
-    # 2. Try git diff against root/empty tree
-    try:
-        diff = subprocess.check_output(
-            ["git", "diff", "4b825dc642cb6eb9a060e54bf8d69288fbee4904", "HEAD", "--", "*.py"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-        if diff:
-            return "diff", diff
-    except Exception:
-        pass
-
-    # 3. Fallback: If no diff detected, read all existing .py files directly
+    # Fallback to reading all current Python files
     py_files = [
         f for f in glob.glob("**/*.py", recursive=True)
-        if not f.startswith(".github") and not f.startswith(".venv")
+        if not f.startswith(".github") and not f.startswith(".venv") and not f.startswith("venv")
     ]
     if not py_files:
         return None, ""
 
-    combined_code = []
-    for filepath in py_files:
+    combined = []
+    for path in py_files:
         try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                combined_code.append(f"### File: {filepath}\n```python\n{f.read()}\n```")
+            with open(path, "r", encoding="utf-8") as f:
+                combined.append(f"### File: {path}\n```python\n{f.read()}\n```")
         except Exception:
             continue
 
-    return "full_files", "\n\n".join(combined_code)
+    return "full_files", "\n\n".join(combined)
 
 
-def call_gemini_with_fallback(client, prompt):
-    # Candidate models to try in sequence if one experiences a 503 spike
-    candidate_models = [
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-2.0-flash-lite",
-        "gemini-3.8-flash",
-    ]
-
-    for model_name in candidate_models:
+def call_gemini(client: genai.Client, prompt: str) -> tuple[str, str]:
+    for model in MODELS:
         for attempt in range(2):
             try:
-                print(f"Attempting review with model: {model_name}...")
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                )
-                return response.text, model_name
+                logger.info("Evaluating with model: %s...", model)
+                res = client.models.generate_content(model=model, contents=prompt)
+                if res.text:
+                    return res.text, model
             except APIError as e:
-                # Catch 503 (high demand) or 429 (rate limits) and retry
-                if getattr(e, "code", None) in [503, 429]:
-                    wait_time = (attempt + 1) * 3
-                    print(f"Model {model_name} busy ({e.message}). Retrying in {wait_time}s...")
-                    time.sleep(wait_time)
+                if getattr(e, "code", None) in {429, 503}:
+                    time.sleep((attempt + 1) * 3)
                 else:
-                    # Model not available or 404, move straight to the next candidate model
-                    print(f"Skipping {model_name}: {e.message}")
                     break
-            except Exception as e:
-                print(f"Unexpected error with {model_name}: {e}")
+            except Exception:
                 break
+    raise RuntimeError("Unable to complete review with available Gemini models.")
 
-    raise RuntimeError("All candidate Gemini models were unavailable or experiencing high demand.")
 
-
-def run_review():
+def run():
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        print("Error: GEMINI_API_KEY environment variable not found.")
+        logger.error("GEMINI_API_KEY is not set.")
         return
 
-    content_type, code_content = get_target_code()
-    if not code_content:
-        print("No Python (.py) files or changes found to review.")
+    content_type, code = get_target_code()
+    if not code:
+        logger.info("No Python changes found to review.")
         return
 
-    rules_path = "agents/solid_agent.md"
     rules = ""
-    if os.path.exists(rules_path):
-        with open(rules_path, "r", encoding="utf-8") as f:
+    if os.path.exists(RULES_FILE):
+        with open(RULES_FILE, "r", encoding="utf-8") as f:
             rules = f.read()
 
     fence = "```"
-    if content_type == "diff":
-        prompt = (
-            "System Rules & Persona:\n"
-            + rules
-            + "\n\nReview the following git diff based strictly on your rules:\n\n"
-            + fence + "diff\n"
-            + code_content + "\n"
-            + fence
-        )
-    else:
-        prompt = (
-            "System Rules & Persona:\n"
-            + rules
-            + "\n\nReview the following repository Python files based strictly on your rules:\n\n"
-            + code_content
-        )
+    prompt = (
+        f"{rules}\n\nReview the following Python code based on the instructions above:\n\n"
+        f"{fence}{'diff' if content_type == 'diff' else 'python'}\n{code}\n{fence}"
+    )
 
     try:
         client = genai.Client(api_key=api_key)
-        review_text, used_model = call_gemini_with_fallback(client, prompt)
+        review, model_used = call_gemini(client, prompt)
 
         print("\n" + "=" * 50)
-        print(f"AI CODE REVIEW RESULTS (Generated by {used_model})")
+        print(f"AI INTERVIEW REVIEW ({model_used})")
         print("=" * 50 + "\n")
-        print(review_text)
+        print(review)
 
-        step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
-        if step_summary:
-            with open(step_summary, "a", encoding="utf-8") as f:
-                f.write(f"## 🤖 AI Code Review (`{used_model}`)\n\n{review_text}\n")
+        summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary_path:
+            with open(summary_path, "a", encoding="utf-8") as f:
+                f.write(f"## 🤖 LLD Interview Review (`{model_used}`)\n\n{review}\n")
 
     except Exception as e:
-        print(f"Error during Gemini review: {e}")
+        logger.error("Review failed: %s", e)
 
 
 if __name__ == "__main__":
-    run_review()
+    run()
