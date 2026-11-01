@@ -1,6 +1,6 @@
 # This class follows SRP
 
-# This class is now only reponsible for Employee creation and data management.
+# This class is now reponsible for Employee creation and data management.
 class Employee:
     id: int
     name: str
